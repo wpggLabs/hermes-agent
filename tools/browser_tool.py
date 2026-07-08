@@ -4377,6 +4377,57 @@ def cleanup_all_browsers() -> None:
     except Exception:
         pass
 
+    # Windows: kill orphaned agent-browser host processes that survive
+    # per-session daemon cleanup.  agent-browser-win32-x64.exe is a
+    # persistent host binary that stays alive between sessions and
+    # accumulates over time, eventually causing WinError 1450
+    # ("Insufficient system resources") after many browser sessions.
+    # Only targets processes with "agent-browser" and "chrome" in their
+    # command line — never touches msedgewebview2.exe (Hermes UI).
+    if sys.platform == "win32":
+        try:
+            from hermes_cli._subprocess_compat import (
+                windows_hide_flags,
+            )  # type: ignore[import-not-found]
+
+            _no_window = {"creationflags": windows_hide_flags()}
+            if shutil.which("wmic"):
+                _kill_result = subprocess.run(
+                    [
+                        shutil.which("wmic"),
+                        "process",
+                        "where",
+                        "commandline like '%agent-browser%chrome%'",
+                        "delete",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    timeout=15,
+                    **_no_window,
+                )
+            else:
+                # wmic removed on modern Windows — fall back to PowerShell
+                ps_path = shutil.which("powershell") or shutil.which("pwsh")
+                if ps_path:
+                    _kill_result = subprocess.run(
+                        [
+                            ps_path,
+                            "-NoProfile",
+                            "-Command",
+                            "Get-CimInstance Win32_Process -Filter \"CommandLine like '%agent-browser%chrome%'\" | Remove-CimInstance",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="ignore",
+                        timeout=15,
+                        **_no_window,
+                    )
+        except Exception:
+            pass  # best-effort cleanup; never crash the shutdown path
+
     # Reset cached lookups so they are re-evaluated on next use.
     global _cached_agent_browser, _agent_browser_resolved
     global _cached_command_timeout, _command_timeout_resolved
