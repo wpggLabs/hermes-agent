@@ -22,6 +22,7 @@ import type { StatusbarItem } from '@/app/shell/statusbar-controls'
 import { TITLEBAR_HEIGHT } from '@/app/shell/titlebar'
 import type { TitlebarTool } from '@/app/shell/titlebar-controls'
 import { DecodeText } from '@/components/ui/decode-text'
+import { ContribBoundary } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { registry } from '@/contrib/registry'
 import { getLogs } from '@/hermes'
@@ -154,7 +155,14 @@ export function useStatusbarContributions(side: 'left' | 'right'): StatusbarItem
   const items = useContributions(`statusBar.${side}`)
 
   return items
-    .map(c => (c.render ? ({ id: c.id, render: c.render } satisfies StatusbarItem) : (c.data as StatusbarItem)))
+    .map(c =>
+      c.render
+        ? ({
+            id: c.id,
+            render: () => <ContribBoundary id={c.id} variant="chip">{c.render!()}</ContribBoundary>
+          } satisfies StatusbarItem)
+        : (c.data as StatusbarItem)
+    )
     .filter(Boolean)
 }
 

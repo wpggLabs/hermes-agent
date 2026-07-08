@@ -13,6 +13,7 @@ import {
   bindTreeSideVisibility,
   declareDefaultTree,
   mirrorLayoutTree,
+  registerPaneCloser,
   resetLayoutTree,
   revealTreePane,
   setTreePaneHidden,
@@ -39,13 +40,13 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '@/store/layout'
-import { $filePreviewTarget, $previewTarget } from '@/store/preview'
-import { $reviewOpen, REVIEW_PANE_ID } from '@/store/review'
+import { $filePreviewTarget, $previewTarget, closeRightRail } from '@/store/preview'
+import { $reviewOpen, closeReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd } from '@/store/session'
 
 import { FilesPane, LogsPane, PreviewRailPane, ReviewPaneContent } from './contrib-panes'
 import { ContribWiring, WiredPane } from './contrib-wiring'
-import { $terminalTakeover } from './right-sidebar/store'
+import { $terminalTakeover, setTerminalTakeover } from './right-sidebar/store'
 
 /**
  * Stripped-down app root (bb/contrib-areas) on the layout TREE model, mounting
@@ -291,9 +292,19 @@ watchContributedPanes()
 // toggle mirrors the root row.
 // ---------------------------------------------------------------------------
 
-function bindPaneVisibility(paneId: string, $open: { get(): boolean; listen(fn: (open: boolean) => void): void }) {
+function bindPaneVisibility(
+  paneId: string,
+  $open: { get(): boolean; listen(fn: (open: boolean) => void): void },
+  close?: () => void
+) {
   setTreePaneHidden(paneId, !$open.get())
   $open.listen(open => setTreePaneHidden(paneId, !open))
+
+  // The tab menu's Close routes through the owning store (never dismissal),
+  // so the pane's toggle buttons stay truthful.
+  if (close) {
+    registerPaneCloser(paneId, close)
+  }
 }
 
 // The legacy file-browser pane state ships CLOSED by default, but the tree's
@@ -358,11 +369,12 @@ bindPaneVisibility('files', $hasWorkspace)
 // ⌘G — the review sidebar appears/disappears (and comes to the front).
 bindPaneVisibility(
   'review',
-  computed([$reviewOpen, $hasWorkspace], (open, workspace) => open && workspace)
+  computed([$reviewOpen, $hasWorkspace], (open, workspace) => open && workspace),
+  closeReview
 )
 // ⌃` / statusbar toggle — the terminal zone follows takeover instead of
 // being forced on (PTYs stay alive while hidden; see PersistentTerminal).
-bindPaneVisibility('terminal', $terminalTakeover)
+bindPaneVisibility('terminal', $terminalTakeover, () => setTerminalTakeover(false))
 
 // Preview EXISTS only while something is previewed (old-shell semantics:
 // closing the last preview tab closes the pane; a new target opens + fronts
@@ -372,7 +384,10 @@ const $previewVisible = computed([$previewTarget, $filePreviewTarget], (target, 
   Boolean(target || fileTarget)
 )
 
-bindPaneVisibility('preview', $previewVisible)
+bindPaneVisibility('preview', $previewVisible, closeRightRail)
+// Sessions' visibility is the LEFT-side toggle's job — Close just collapses
+// the side (⌘B truthful, titlebar button flips back).
+registerPaneCloser('sessions', () => setSidebarOpen(false))
 // A NEW target while the pane is already visible still fronts it.
 $previewTarget.listen(target => target && revealTreePane('preview'))
 $filePreviewTarget.listen(target => target && revealTreePane('preview'))

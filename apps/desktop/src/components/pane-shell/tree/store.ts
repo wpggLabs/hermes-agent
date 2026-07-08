@@ -22,6 +22,7 @@ import {
   mirrorRootRow,
   movePane as movePaneOp,
   normalize,
+  removePane,
   reorderPaneInGroup as reorderPaneInGroupOp,
   type RootEdge,
   setActivePane as setActivePaneOp,
@@ -137,6 +138,85 @@ export function setTreePaneHidden(paneId: string, hidden: boolean) {
 }
 
 /**
+ * CLOSE — the tab context menu's "Close". Two routes:
+ *  - a registered closer (core panes whose visibility an app store owns:
+ *    review/terminal/preview/sessions) closes through that store, so the
+ *    titlebar/statusbar toggles stay truthful;
+ *  - everything else (plugin panes, unbound core panes) is DISMISSED: removed
+ *    from the tree and remembered so adoption doesn't re-add it. Reveal
+ *    intent (a preview target, ⌘G) or a layout reset un-dismisses.
+ */
+const DISMISSED_KEY = 'hermes.desktop.dismissedPanes.v1'
+
+function loadDismissed(): ReadonlySet<string> {
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_KEY)
+
+    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+export const $dismissedPanes = atom<ReadonlySet<string>>(loadDismissed())
+
+function saveDismissed(next: ReadonlySet<string>) {
+  $dismissedPanes.set(next)
+
+  try {
+    if (next.size === 0) {
+      window.localStorage.removeItem(DISMISSED_KEY)
+    } else {
+      window.localStorage.setItem(DISMISSED_KEY, JSON.stringify([...next]))
+    }
+  } catch {
+    // Nonfatal.
+  }
+}
+
+function setDismissed(paneId: string, dismissed: boolean) {
+  const current = $dismissedPanes.get()
+
+  if (current.has(paneId) === dismissed) {
+    return
+  }
+
+  const next = new Set(current)
+
+  if (dismissed) {
+    next.add(paneId)
+  } else {
+    next.delete(paneId)
+  }
+
+  saveDismissed(next)
+}
+
+const paneClosers: Record<string, () => void> = {}
+
+/** Route a pane's Close through the app store that owns its visibility. */
+export function registerPaneCloser(paneId: string, close: () => void) {
+  paneClosers[paneId] = close
+}
+
+export function closeTreePane(paneId: string) {
+  const closer = paneClosers[paneId]
+
+  if (closer) {
+    closer()
+
+    return
+  }
+
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    setDismissed(paneId, true)
+    commit(removePane(tree, paneId))
+  }
+}
+
+/**
  * POSITIONAL side collapse — the titlebar's left/right sidebar toggles (and
  * ⌘B / ⌘J). Everything on that side of the MAIN zone in the root row hides
  * together, whatever panes live there (this is what makes the buttons agree
@@ -206,6 +286,12 @@ export function treeSideOfPane(paneId: string): TreeSide | null {
  * open its side, unhide it, and bring it to the front of its group.
  */
 export function revealTreePane(paneId: string) {
+  // Reveal beats a Close: un-dismiss and let adoption put the pane back.
+  if ($dismissedPanes.get().has(paneId)) {
+    setDismissed(paneId, false)
+    adoptContributedPanes()
+  }
+
   const side = treeSideOfPane(paneId)
 
   if (side && $collapsedTreeSides.get().has(side)) {
@@ -321,12 +407,24 @@ export function declareDefaultTree(tree: LayoutNode) {
 /**
  * LIVE pane adoption — a `panes` contribution that isn't in the tree yet
  * (a plugin registered after boot, incl. runtime-loaded ones) joins the
- * zone its `placement` hint infers: it stacks with a settled pane of the
- * same placement, falling back to the main zone, and fronts itself (the
- * "your pane appeared" moment — happens once per pane lifetime, since the
- * committed tree remembers it across boots; from then on user rearrangement
- * wins, and plugin reloads keep the pane where the user left it).
+ * tree via the SAME primitive a human drag/drop commits with
+ * (`insertAtGroup`: anchor group + side). The pane's data supplies the
+ * gesture:
+ *
+ *  - `dock: { pane, pos }` — "drop me on that edge of that pane". Any pane,
+ *    any side, exactly what the drop chips do.
+ *  - otherwise the semantic `placement` role infers the anchor: stack with
+ *    a settled pane of the same placement, main zone as last resort.
+ *
+ * Happens once per pane lifetime (the committed tree remembers it across
+ * boots), so user rearrangement wins from then on and plugin reloads keep
+ * the pane where the user left it.
  */
+interface PaneDockHint {
+  pane: string
+  pos: DropPosition
+}
+
 function adoptContributedPanes(): void {
   const tree = $layoutTree.get()
 
@@ -335,9 +433,12 @@ function adoptContributedPanes(): void {
   }
 
   const panes = registry.getArea('panes')
-  const placementOf = (paneId: string) => (panes.find(c => c.id === paneId)?.data as { placement?: string } | undefined)?.placement
+  const dataOf = (paneId: string) => panes.find(c => c.id === paneId)?.data as { placement?: string; dock?: PaneDockHint } | undefined
+  const placementOf = (paneId: string) => dataOf(paneId)?.placement
+  const mainId = panes.find(c => placementOf(c.id) === 'main')?.id
   const inTree = new Set(allPaneIds(tree))
-  const missing = panes.filter(c => !inTree.has(c.id))
+  const dismissed = $dismissedPanes.get()
+  const missing = panes.filter(c => !inTree.has(c.id) && !dismissed.has(c.id))
 
   if (missing.length === 0) {
     return
@@ -346,13 +447,27 @@ function adoptContributedPanes(): void {
   let next = tree
 
   for (const pane of missing) {
+    const dock = dataOf(pane.id)?.dock
     const placement = placementOf(pane.id) ?? 'right'
-    const sibling = allPaneIds(next).find(id => id !== pane.id && placementOf(id) === placement)
-    const main = panes.find(c => placementOf(c.id) === 'main')?.id
-    const target = findGroupOfPane(next, sibling ?? '')?.id ?? findGroupOfPane(next, main ?? '')?.id
+
+    const anchor =
+      (dock && allPaneIds(next).includes(dock.pane) ? dock.pane : undefined) ??
+      allPaneIds(next).find(id => id !== pane.id && placementOf(id) === placement) ??
+      mainId
+
+    const target = findGroupOfPane(next, anchor ?? '')?.id
 
     if (target) {
-      next = insertAtGroup(next, target, pane.id, 'center') ?? next
+      next = insertAtGroup(next, target, pane.id, dock?.pos ?? 'center') ?? next
+
+      // An adopted pane ARRIVES with its chip showing — a surprise zone with
+      // zero chrome has no obvious handle to drag or close. (Explicit reveal;
+      // the next structural op returns lone panes to the auto-hide default.)
+      const landed = findGroupOfPane(next, pane.id)
+
+      if (landed) {
+        next = setGroupHeaderHiddenOp(next, landed.id, false)
+      }
     }
   }
 
@@ -526,6 +641,8 @@ export function persistTree() {
 export function resetLayoutTree() {
   persist(null)
   clearAllPaneSizeOverrides()
+  // Reset restores EVERYTHING — closed panes included.
+  saveDismissed(new Set())
   $layoutTree.set(defaultTree)
   markActivePreset('default')
   // Plugin panes aren't in the declared default — re-adopt by placement.
@@ -535,8 +652,12 @@ export function resetLayoutTree() {
 // Dev hook for automation.
 if (import.meta.env.DEV && typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).__HERMES_LAYOUT_TREE__ = {
+    close: closeTreePane,
+    dismissed: () => $dismissedPanes.get(),
     get: () => $layoutTree.get(),
     move: moveTreePane,
-    reset: resetLayoutTree
+    registry,
+    reset: resetLayoutTree,
+    reveal: revealTreePane
   }
 }

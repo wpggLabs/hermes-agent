@@ -15,6 +15,7 @@ import { type MouseEvent as ReactMouseEvent, type ReactNode, useRef } from 'reac
 import { Codicon } from '@/components/ui/codicon'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { DecodeText } from '@/components/ui/decode-text'
+import { ContribBoundary } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { cn } from '@/lib/utils'
 
@@ -29,6 +30,7 @@ import {
   $narrowViewport,
   $treeDragging,
   activateTreePane,
+  closeTreePane,
   moveTreePane,
   setTreeGroupHeaderHidden,
   splitTreeZone,
@@ -58,12 +60,16 @@ const DIRECTION_ARROW: Record<RootEdge, string> = { bottom: '↓', left: '←', 
  *  neighbor aren't offered, so no action ever appears to do nothing. */
 function ZoneMenu({
   children,
+  closable,
   directions,
   headerHidden,
   minimized,
   nodeId
 }: {
   children: ReactNode
+  /** The pane the menu closes (the right-clicked chip / the active pane);
+   *  undefined = not closable (the main zone). */
+  closable?: () => string | undefined
   directions: ZoneMenuDirection[]
   headerHidden?: boolean
   minimized?: boolean
@@ -84,6 +90,19 @@ function ZoneMenu({
         <ContextMenuItem onSelect={() => toggleTreeGroupMinimized(nodeId, !minimized)}>
           {minimized ? 'Restore' : 'Minimize'}
         </ContextMenuItem>
+        {closable && (
+          <ContextMenuItem
+            onSelect={() => {
+              const paneId = closable()
+
+              if (paneId) {
+                closeTreePane(paneId)
+              }
+            }}
+          >
+            Close
+          </ContextMenuItem>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -167,8 +186,16 @@ export function TreeGroup({ node }: { node: GroupNode }) {
           ]
         })
 
+  // Close targets the right-clicked chip (falling back to the active pane);
+  // the main zone is the one surface without a Close.
+  const closable = () => {
+    const paneId = menuPaneRef.current ?? activeId
+
+    return paneChrome(paneFor(paneId)).placement === 'main' ? undefined : paneId
+  }
+
   // Same menu on the header strip and the edit veil — one prop bag.
-  const zoneMenu = { directions: menuDirections, headerHidden, minimized: node.minimized, nodeId: node.id }
+  const zoneMenu = { closable, directions: menuDirections, headerHidden, minimized: node.minimized, nodeId: node.id }
 
   // FancyZones semantics: the highlight SET (multi-zone with Shift) lights up
   // strongly; the primary zone (ClosestCenter) carries the action badge.
@@ -308,7 +335,7 @@ export function TreeGroup({ node }: { node: GroupNode }) {
               <DecodeText className="text-(--ui-text-quaternary)" cursor prefix={1} text="HERMES" />
             </div>
           ) : active?.render ? (
-            active.render()
+            <ContribBoundary id={active.id}>{active.render()}</ContribBoundary>
           ) : (
             <div className="p-3 font-mono text-[11px] text-(--ui-text-quaternary)">missing pane: {activeId}</div>
           )}

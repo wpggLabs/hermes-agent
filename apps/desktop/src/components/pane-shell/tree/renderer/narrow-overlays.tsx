@@ -9,6 +9,7 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { ContribBoundary } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
 import type { Contribution } from '@/contrib/types'
 import { cn } from '@/lib/utils'
@@ -109,7 +110,7 @@ export function NarrowOverlays() {
           )}
           onMouseLeave={() => setReveal(current => (current?.pinned ? current : null))}
         >
-          {revealed.render?.()}
+          <ContribBoundary id={revealed.id}>{revealed.render?.()}</ContribBoundary>
         </div>
       )}
     </>
