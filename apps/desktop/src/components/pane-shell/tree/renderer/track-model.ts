@@ -111,13 +111,20 @@ export function fixedTrackSize(node: LayoutNode, axis: 'row' | 'column', ctx: Tr
     const overrideKey = axis === 'row' ? 'widthOverride' : 'heightOverride'
 
     const declared = (id: string) => {
-      if (ctx.overrides[id]?.[overrideKey] !== undefined) {
-        return `${ctx.overrides[id]?.[overrideKey]}px`
+      const sizing = (ctx.paneFor(id)?.data ?? {}) as PaneSizing
+      const css = (axis === 'row' ? sizing.width : sizing.height) ?? null
+      const override = ctx.overrides[id]?.[overrideKey]
+
+      // An override only refines a pane that DECLARES a size along this axis
+      // (sash drags write overrides to fixed zones only). One without a
+      // declaration is stale data from another surface — honoring it would
+      // turn a flex-at-heart zone (main!) into a fixed track and hand the
+      // whole leftover to the run's absorber.
+      if (css !== null && override !== undefined) {
+        return `${override}px`
       }
 
-      const sizing = (ctx.paneFor(id)?.data ?? {}) as PaneSizing
-
-      return (axis === 'row' ? sizing.width : sizing.height) ?? null
+      return css
     }
 
     // A zone is a fixed track only when EVERY shown pane sizes itself along

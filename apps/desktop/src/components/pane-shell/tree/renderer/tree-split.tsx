@@ -318,6 +318,14 @@ export function TreeSplit({ node, root }: { node: SplitNode; root?: boolean }) {
   const allFixed = growable.length > 0 && growable.every(i => tracks[i].track !== null)
   const absorberIndex = allFixed ? growable[growable.length - 1] : -1
 
+  // Weights are RATIOS, but CSS flex-grow is absolute: a run whose grows sum
+  // below 1 fills only that fraction of the leftover (normalize's flatten
+  // scales weights into the parent slot — a dock-split nested into an
+  // existing column can leave grow 0.5, i.e. dead space). Renormalize the
+  // flex run so its grows always sum to 1.
+  const flexTotal = growable.reduce((sum, i) => sum + (tracks[i].track === null ? node.weights[i] : 0), 0)
+  const grow = (i: number) => node.weights[i] / (flexTotal || 1)
+
   return (
     <div
       className={cn('flex min-h-0 min-w-0 flex-1', horizontal ? 'flex-row' : 'flex-col')}
@@ -341,7 +349,7 @@ export function TreeSplit({ node, root }: { node: SplitNode; root?: boolean }) {
                     // all-fixed run the last track grows into the leftover.
                     flex: track
                       ? `${i === absorberIndex ? 1 : 0} 1 ${track}`
-                      : `${node.weights[i]} ${node.weights[i]} 0px`,
+                      : `${grow(i)} ${grow(i)} 0px`,
                     // Pane-declared clamps apply along THIS split's axis only
                     // (a rail's width clamp shouldn't constrain its height).
                     // The absorber drops its max clamp — it exists to fill
