@@ -1,9 +1,10 @@
 import { ComposerPrimitive } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type ClipboardEvent, type FormEvent, type KeyboardEvent, useEffect, useRef } from 'react'
+import { type ClipboardEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useRef } from 'react'
 
 import { composerFill, composerSurfaceGlass } from '@/components/chat/composer-dock'
 import { Button } from '@/components/ui/button'
+import { Slot as ContribSlot } from '@/contrib/react/slot'
 import { useI18n } from '@/i18n'
 import { chatMessageText } from '@/lib/chat-messages'
 import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
@@ -23,6 +24,7 @@ import { useTheme } from '@/themes'
 import { AttachmentList } from './attachments'
 import { COMPOSER_FADE_BACKGROUND, type QueueEditState, slashArgStage } from './composer-utils'
 import { ContextMenu } from './context-menu'
+import { COMPOSER_AREAS, runComposerMiddleware } from './contrib'
 import { ComposerControls } from './controls'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
 import { markActiveComposer } from './focus'
@@ -79,9 +81,25 @@ export function ChatBar({
   onPickImages,
   onRemoveAttachment,
   onSteer,
-  onSubmit,
+  onSubmit: onSubmitProp,
   onTranscribeAudio
 }: ChatBarProps) {
+  // Every send (typed, queued, voice) passes through the contributed
+  // middleware chain first — rewrite / pass-through / cancel. Empty chain =
+  // exact pass-through, so surfaces without contributions are byte-identical.
+  const onSubmit = useCallback<ChatBarProps['onSubmit']>(
+    async (value, options) => {
+      const draft = await runComposerMiddleware({ text: value, attachments: options?.attachments })
+
+      if (!draft) {
+        return false
+      }
+
+      return onSubmitProp(draft.text, { ...options, attachments: draft.attachments })
+    },
+    [onSubmitProp]
+  )
+
   const attachments = useStore($composerAttachments)
   const scrolledUp = useStore($threadScrolledUp)
   const autoSpeak = useStore($autoSpeakReplies)
@@ -935,6 +953,10 @@ export function ChatBar({
                 )}
                 data-slot="composer-fade"
               >
+                {/* Contribution seams: banners above, a row below, inline
+                    additions beside the "+" menu and before the controls.
+                    All four render nothing until something contributes. */}
+                <ContribSlot area={COMPOSER_AREAS.top} />
                 <VoiceActivity state={voiceActivityState} />
                 <VoicePlaybackActivity />
                 {queueEdit && editingQueuedPrompt && (
@@ -970,10 +992,17 @@ export function ChatBar({
                       : 'grid-cols-[auto_1fr_auto] items-center gap-(--composer-control-gap) [grid-template-areas:"menu_input_controls"]'
                   )}
                 >
-                  <div className="flex translate-y-[3px] items-start self-start [grid-area:menu]">{contextMenu}</div>
+                  <div className="flex translate-y-[3px] items-start gap-(--composer-control-gap) self-start [grid-area:menu]">
+                    {contextMenu}
+                    <ContribSlot area={COMPOSER_AREAS.leading} />
+                  </div>
                   <div className="min-w-0 [grid-area:input]">{input}</div>
-                  <div className="flex items-center justify-end [grid-area:controls]">{controls}</div>
+                  <div className="flex items-center justify-end gap-(--composer-control-gap) [grid-area:controls]">
+                    <ContribSlot area={COMPOSER_AREAS.actions} />
+                    {controls}
+                  </div>
                 </div>
+                <ContribSlot area={COMPOSER_AREAS.bottom} />
               </div>
             </div>
           </div>

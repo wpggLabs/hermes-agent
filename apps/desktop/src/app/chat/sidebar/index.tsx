@@ -34,8 +34,6 @@ import {
   $sidebarAgentsGrouped,
   $sidebarCronOpen,
   $sidebarMessagingOpenIds,
-  $sidebarOpen,
-  $sidebarOverlayMounted,
   $sidebarPinsOpen,
   $sidebarProjectOrderIds,
   $sidebarRecentsOpen,
@@ -229,10 +227,6 @@ export function ChatSidebar({
 }: ChatSidebarProps) {
   const { t } = useI18n()
   const s = t.sidebar
-  const sidebarOpen = useStore($sidebarOpen)
-  // Collapsed-but-overlay-mounted → render the full sidebar, not just the nav rail.
-  const overlayMounted = useStore($sidebarOverlayMounted)
-  const contentVisible = sidebarOpen || overlayMounted
   const panesFlipped = useStore($panesFlipped)
   const agentsGrouped = useStore($sidebarAgentsGrouped)
   const pinnedSessionIds = useStore($pinnedSessionIds)
@@ -1031,15 +1025,12 @@ export function ChatSidebar({
   return (
     <Sidebar
       className={cn(
+        // Visibility is the layout tree's job (a hidden zone is display:none;
+        // the narrow overlay renders the live instance) — the sidebar always
+        // paints itself fully.
         'relative h-full min-w-0 overflow-hidden border-t-0 border-b-0 text-foreground transition-none',
         panesFlipped ? 'border-l border-r-0' : 'border-r border-l-0',
-        sidebarOpen
-          ? 'border-(--sidebar-edge-border) bg-(--ui-sidebar-surface-background) opacity-100'
-          : 'pointer-events-none border-transparent bg-transparent opacity-0',
-        // While floated by PaneShell's hover-reveal, force visible + interactive
-        // — on hover (group-hover/reveal) or when keyboard-pinned (data-forced).
-        'in-data-[pane-hover-reveal=open]:pointer-events-auto in-data-[pane-hover-reveal=open]:border-(--sidebar-edge-border) in-data-[pane-hover-reveal=open]:bg-(--ui-sidebar-surface-background) in-data-[pane-hover-reveal=open]:opacity-100',
-        'group-hover/reveal:pointer-events-auto group-hover/reveal:border-(--sidebar-edge-border) group-hover/reveal:bg-(--ui-sidebar-surface-background) group-hover/reveal:opacity-100'
+        'border-(--sidebar-edge-border) bg-(--ui-sidebar-surface-background) opacity-100'
       )}
       collapsible="none"
     >
@@ -1090,17 +1081,13 @@ export function ChatSidebar({
                       type="button"
                     >
                       <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
-                      {contentVisible && (
-                        <>
-                          <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
-                          {isNewSession && (
-                            <KbdGroup
-                              className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
-                              keys={[...NEW_SESSION_KBD]}
-                              size="sm"
-                            />
-                          )}
-                        </>
+                      <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                      {isNewSession && (
+                        <KbdGroup
+                          className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
+                          keys={[...NEW_SESSION_KBD]}
+                          size="sm"
+                        />
                       )}
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -1110,7 +1097,7 @@ export function ChatSidebar({
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {contentVisible && showSessionSections && (
+        {showSessionSections && (
           <div className="shrink-0 px-2 pb-1 pt-1">
             <SearchField
               aria-label={s.searchAria}
@@ -1122,7 +1109,7 @@ export function ChatSidebar({
           </div>
         )}
 
-        {contentVisible && showSessionSections && (
+        {showSessionSections && (
           <div className={cn('flex min-h-0 flex-1 flex-col pb-1.75', SCROLL_Y)}>
             {trimmedQuery && (
               <SidebarSessionsSection
@@ -1392,13 +1379,11 @@ export function ChatSidebar({
           </div>
         )}
 
-        {contentVisible && !showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
+        {!showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
 
-        {contentVisible && (
-          <div className="shrink-0 px-0.5 pb-1 pt-0.5">
-            <ProfileRail />
-          </div>
-        )}
+        <div className="shrink-0 px-0.5 pb-1 pt-0.5">
+          <ProfileRail />
+        </div>
       </SidebarContent>
       <ProjectDialog />
     </Sidebar>

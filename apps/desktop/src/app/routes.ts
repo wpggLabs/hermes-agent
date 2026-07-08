@@ -1,3 +1,7 @@
+import type { ReactNode } from 'react'
+
+import { registry } from '@/contrib/registry'
+
 export const SESSION_ROUTE_PREFIX = '/'
 export const NEW_CHAT_ROUTE = '/'
 export const SETTINGS_ROUTE = '/settings'
@@ -56,6 +60,31 @@ export const APP_ROUTES = [
 const APP_VIEW_BY_PATH = new Map<string, AppView>(APP_ROUTES.map(route => [route.path, route.view]))
 const RESERVED_PATHS: ReadonlySet<string> = new Set(APP_ROUTES.map(route => route.path))
 
+// ── Contributed routes — the `routes` registry area ─────────────────────────
+// A data contribution mounts a full page in the workspace pane at `path`.
+// Contributed paths are reserved exactly like APP_ROUTES so the session-id
+// parser never mistakes them for a session route.
+
+export const ROUTES_AREA = 'routes'
+
+/** Payload of a `routes` data contribution. */
+export interface RouteContribution {
+  /** Absolute path, e.g. `/kanban`. One segment; no params. */
+  path: string
+  render: () => ReactNode
+}
+
+export function contributedRoutes(): Array<RouteContribution & { key: string }> {
+  return registry
+    .getArea(ROUTES_AREA)
+    .map(c => ({ key: `${c.source ?? 'core'}:${c.id}`, ...(c.data as RouteContribution) }))
+    .filter(route => Boolean(route.path?.startsWith('/') && route.render) && !RESERVED_PATHS.has(route.path))
+}
+
+function isContributedPath(pathname: string): boolean {
+  return registry.getArea(ROUTES_AREA).some(c => (c.data as RouteContribution | undefined)?.path === pathname)
+}
+
 // Views that render as a full-screen modal card (OverlayView) over the shell.
 // While one is open the app's titlebar control clusters must hide so they don't
 // bleed over the overlay (they sit at a higher z-index than the overlay card).
@@ -77,7 +106,7 @@ export function isNewChatRoute(pathname: string): boolean {
 }
 
 export function routeSessionId(pathname: string): string | null {
-  if (!pathname.startsWith(SESSION_ROUTE_PREFIX) || RESERVED_PATHS.has(pathname)) {
+  if (!pathname.startsWith(SESSION_ROUTE_PREFIX) || RESERVED_PATHS.has(pathname) || isContributedPath(pathname)) {
     return null
   }
 

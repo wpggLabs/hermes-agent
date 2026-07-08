@@ -940,6 +940,7 @@ export const en: Translations = {
     goTo: 'Go to',
     goToSession: 'Go to session',
     branches: 'Branches',
+    commands: 'Commands',
     startInBranch: branch => `New conversation in ${branch}`,
     commandCenter: 'Command Center',
     appearance: 'Appearance',

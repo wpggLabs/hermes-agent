@@ -826,6 +826,7 @@ export interface Translations {
     goTo: string
     goToSession: string
     branches: string
+    commands: string
     startInBranch: (branch: string) => string
     commandCenter: string
     appearance: string

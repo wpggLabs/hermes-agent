@@ -12,7 +12,6 @@ import { $hapticsMuted, toggleHapticsMuted } from '@/store/haptics'
 import { toggleKeybindPanel } from '@/store/keybinds'
 import {
   $fileBrowserOpen,
-  $panesFlipped,
   $sidebarOpen,
   toggleFileBrowserOpen,
   togglePanesFlipped,
@@ -53,7 +52,6 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const hapticsMuted = useStore($hapticsMuted)
   const fileBrowserOpen = useStore($fileBrowserOpen)
   const sidebarOpen = useStore($sidebarOpen)
-  const panesFlipped = useStore($panesFlipped)
 
   const toggleHaptics = () => {
     if (!hapticsMuted) {
@@ -67,14 +65,13 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     }
   }
 
-  // Each titlebar button controls the pane physically on its side, so a flip
-  // swaps which pane each one toggles. Default: sessions left, file browser
-  // right. Flipped: file browser left, sessions right. Sidebar toggles never
-  // carry an active highlight — they're plain show/hide affordances.
-  const fileBrowserEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
-  const sessionsEdge = { open: sidebarOpen, toggle: toggleSidebarOpen }
-  const leftEdge = panesFlipped ? fileBrowserEdge : sessionsEdge
-  const rightEdge = panesFlipped ? sessionsEdge : fileBrowserEdge
+  // POSITIONAL toggles: each button shows/hides everything on its physical
+  // side of the main zone (the layout tree collapses the whole side), so they
+  // stay correct through flips and rearranges. $sidebarOpen ≙ left side,
+  // $fileBrowserOpen ≙ right side. Never an active highlight — plain
+  // show/hide affordances.
+  const leftEdge = { open: sidebarOpen, toggle: toggleSidebarOpen }
+  const rightEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
 
   const leftToolbarTools: TitlebarTool[] = [
     {

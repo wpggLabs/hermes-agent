@@ -1,0 +1,491 @@
+/**
+ * Layout tree store: one persisted tree replaces paneStates side/band
+ * overrides. The DEFAULT tree is declared by the app root (like config);
+ * the persisted tree is the user's customization; reset returns to default.
+ */
+
+import { atom } from 'nanostores'
+
+import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '@/app/layout-constants'
+import { registry } from '@/contrib/registry'
+import { clearAllPaneSizeOverrides } from '@/store/panes'
+
+import {
+  allPaneIds,
+  type DropPosition,
+  findGroupOfPane,
+  groupLeafIds,
+  insertAtGroup,
+  isLayoutNode,
+  type LayoutNode,
+  mergeZonesWithPane as mergeZonesWithPaneOp,
+  mirrorRootRow,
+  movePane as movePaneOp,
+  normalize,
+  reorderPaneInGroup as reorderPaneInGroupOp,
+  type RootEdge,
+  setActivePane as setActivePaneOp,
+  setGroupHeaderHidden as setGroupHeaderHiddenOp,
+  setGroupMinimized,
+  setSplitWeights as setSplitWeightsOp,
+  splitGroupZone as splitGroupZoneOp
+} from './model'
+
+// v2: v1 trees were saved against placeholder panes with index-order zone
+// assignment (chat could land in a corner cell). Retire them wholesale.
+const STORAGE_KEY = 'hermes.desktop.layoutTree.v2'
+
+try {
+  window.localStorage.removeItem('hermes.desktop.layoutTree.v1')
+} catch {
+  // Nonfatal.
+}
+
+let defaultTree: LayoutNode | null = null
+
+function loadPersisted(): LayoutNode | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw) as unknown
+
+    // Canonicalize on load: strips stale attributes older code persisted
+    // (e.g. explicit headerHidden on lone-pane zones) and re-flattens.
+    return isLayoutNode(parsed) ? normalize(parsed) : null
+  } catch {
+    return null
+  }
+}
+
+function persist(tree: LayoutNode | null) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    if (tree) {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tree))
+    } else {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
+  } catch {
+    // Storage failures are nonfatal.
+  }
+}
+
+/** The live tree (null until a default is declared). */
+export const $layoutTree = atom<LayoutNode | null>(loadPersisted())
+
+/**
+ * Which layout preset the current tree came from; `'custom'` after the user
+ * rearranges anything. Drives the picker's active highlight.
+ */
+export const $activePresetId = atom<string>(
+  typeof window === 'undefined' ? 'default' : (window.localStorage.getItem('hermes.desktop.layoutPreset.active') ?? 'default')
+)
+
+export function markActivePreset(id: string) {
+  $activePresetId.set(id)
+
+  try {
+    window.localStorage.setItem('hermes.desktop.layoutPreset.active', id)
+  } catch {
+    // Nonfatal.
+  }
+}
+
+/** Pane id being dragged (tree drag session), null when idle. */
+export const $treeDragging = atom<string | null>(null)
+
+/**
+ * Panes hidden by app chrome toggles (titlebar sidebar / right-sidebar
+ * buttons). The tree KEEPS the zone and its mounted content; a zone whose
+ * every pane is hidden collapses to nothing until a toggle brings it back.
+ * Not persisted here — each binding's store owns persistence.
+ */
+export const $hiddenTreePanes = atom<ReadonlySet<string>>(new Set())
+
+export function setTreePaneHidden(paneId: string, hidden: boolean) {
+  const current = $hiddenTreePanes.get()
+
+  if (current.has(paneId) === hidden) {
+    return
+  }
+
+  const next = new Set(current)
+
+  if (hidden) {
+    next.add(paneId)
+  } else {
+    next.delete(paneId)
+  }
+
+  $hiddenTreePanes.set(next)
+
+  // Unhiding is an intent to SEE the pane — front it in its group.
+  if (!hidden) {
+    revealTreePane(paneId)
+  }
+}
+
+/**
+ * POSITIONAL side collapse — the titlebar's left/right sidebar toggles (and
+ * ⌘B / ⌘J). Everything on that side of the MAIN zone in the root row hides
+ * together, whatever panes live there (this is what makes the buttons agree
+ * with a rearranged layout; the flip derivation works the same way). An AND
+ * on top of per-pane visibility: zone shown ⇔ side open ∧ some pane shown.
+ */
+export type TreeSide = 'left' | 'right'
+
+export const $collapsedTreeSides = atom<ReadonlySet<TreeSide>>(new Set())
+
+// Side visibility is DERIVED from an app store (the binding owns persistence
+// + button state); reveals flow back through its setter so they never
+// disagree with the flag.
+const sideOpeners: Partial<Record<TreeSide, (open: boolean) => void>> = {}
+
+export function setTreeSideCollapsed(side: TreeSide, collapsed: boolean) {
+  const current = $collapsedTreeSides.get()
+
+  if (current.has(side) === collapsed) {
+    return
+  }
+
+  const next = new Set(current)
+
+  if (collapsed) {
+    next.add(side)
+  } else {
+    next.delete(side)
+  }
+
+  $collapsedTreeSides.set(next)
+}
+
+/** Bind a side's visibility to an app store (mirror of bindPaneVisibility). */
+export function bindTreeSideVisibility(
+  side: TreeSide,
+  $open: { get(): boolean; listen(fn: (open: boolean) => void): void },
+  setOpen: (open: boolean) => void
+) {
+  sideOpeners[side] = setOpen
+  setTreeSideCollapsed(side, !$open.get())
+  $open.listen(open => setTreeSideCollapsed(side, !open))
+}
+
+/** The root-row side `paneId` currently sits on, relative to the main zone. */
+export function treeSideOfPane(paneId: string): TreeSide | null {
+  const tree = $layoutTree.get()
+
+  if (!tree || tree.type !== 'split' || tree.orientation !== 'row') {
+    return null
+  }
+
+  const mainPane = registry.getArea('panes').find(c => (c.data as { placement?: string } | undefined)?.placement === 'main')?.id
+  const indexOf = (id?: string) => (id ? tree.children.findIndex(child => allPaneIds(child).includes(id)) : -1)
+  const pane = indexOf(paneId)
+  const main = indexOf(mainPane)
+
+  if (pane < 0 || main < 0 || pane === main) {
+    return null
+  }
+
+  return pane < main ? 'left' : 'right'
+}
+
+/**
+ * App intent "show pane X" (a preview target landed, ⌘G opened review, …):
+ * open its side, unhide it, and bring it to the front of its group.
+ */
+export function revealTreePane(paneId: string) {
+  const side = treeSideOfPane(paneId)
+
+  if (side && $collapsedTreeSides.get().has(side)) {
+    const open = sideOpeners[side]
+
+    // Through the bound store when there is one, so the toggle stays truthful.
+    if (open) {
+      open(true)
+    } else {
+      setTreeSideCollapsed(side, false)
+    }
+  }
+
+  const hiddenNow = $hiddenTreePanes.get()
+
+  if (hiddenNow.has(paneId)) {
+    setTreePaneHidden(paneId, false)
+
+    return
+  }
+
+  const tree = $layoutTree.get()
+  const group = tree ? findGroupOfPane(tree, paneId) : null
+
+  if (tree && group && group.active !== paneId) {
+    commit(setActivePaneOp(tree, group.id, paneId))
+  }
+}
+
+/**
+ * Narrow viewport (the app's sidebar-collapse breakpoint): panes whose
+ * contribution declares `collapsible: true` leave the grid and become
+ * edge overlays (see NarrowOverlays in renderer.tsx).
+ */
+export const $narrowViewport = atom(
+  typeof window !== 'undefined' && window.matchMedia(SIDEBAR_COLLAPSE_MEDIA_QUERY).matches
+)
+
+if (typeof window !== 'undefined') {
+  const query = window.matchMedia(SIDEBAR_COLLAPSE_MEDIA_QUERY)
+  query.addEventListener('change', event => $narrowViewport.set(event.matches))
+}
+
+/** The titlebar flip toggle: swap which side each root-level rail lives on. */
+export function mirrorLayoutTree() {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(mirrorRootRow(tree))
+  }
+}
+
+export interface DropHint {
+  kind: 'group'
+  /** The zone a drop will land in (ClosestCenter among `groupIds`). */
+  groupId?: string
+  /** Full highlighted set (multi-zone when Shift extends the range). */
+  groupIds?: string[]
+  pos?: DropPosition
+}
+
+/** Live drop target under the pointer while dragging. */
+export const $dropHint = atom<DropHint | null>(null)
+
+/**
+ * Adopt panes present in `source` but missing from `target`: each joins the
+ * group its source siblings map to in the target (first group as a last
+ * resort). Layout changes never lose panes.
+ */
+function adoptMissingPanes(target: LayoutNode, source: LayoutNode): LayoutNode {
+  const have = new Set(allPaneIds(target))
+  let next = target
+
+  for (const paneId of allPaneIds(source)) {
+    if (have.has(paneId)) {
+      continue
+    }
+
+    const sibling = findGroupOfPane(source, paneId)?.panes.find(p => have.has(p))
+    const targetId = (sibling ? findGroupOfPane(next, sibling)?.id : undefined) ?? groupLeafIds(next)[0]
+
+    if (targetId) {
+      next = insertAtGroup(next, targetId, paneId, 'center') ?? next
+      have.add(paneId)
+    }
+  }
+
+  return next
+}
+
+/**
+ * Declare the app's default tree. Adopted immediately when the user has no
+ * persisted customization; a persisted tree from an older default adopts any
+ * panes it's missing.
+ */
+export function declareDefaultTree(tree: LayoutNode) {
+  defaultTree = tree
+  const current = $layoutTree.get()
+
+  if (!current) {
+    $layoutTree.set(tree)
+
+    return
+  }
+
+  const next = adoptMissingPanes(current, tree)
+
+  if (next !== current) {
+    commit(next)
+  }
+}
+
+function commit(next: LayoutNode | null) {
+  if (!next) {
+    return
+  }
+
+  $layoutTree.set(next)
+  persist(next)
+}
+
+export function moveTreePane(paneId: string, target: { groupId: string; pos: DropPosition }) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(movePaneOp(tree, paneId, target))
+    markActivePreset('custom')
+  }
+}
+
+/**
+ * Replace the whole tree (preset application). Panes living in the CURRENT
+ * tree that the preset doesn't know about (e.g. plugin panes vs a bundled
+ * preset) are adopted into the group their current siblings land in, so
+ * applying a preset never loses a pane.
+ */
+export function applyTree(tree: LayoutNode, presetId: string) {
+  const previous = $layoutTree.get()
+
+  // A preset defines the layout's SIZES too — stale drag overrides from the
+  // previous arrangement would distort it.
+  clearAllPaneSizeOverrides()
+  commit(previous ? adoptMissingPanes(tree, previous) : tree)
+  markActivePreset(presetId)
+}
+
+/**
+ * Shift-drag span: merge the highlighted zones into one holding `paneId`. Falls
+ * back to a single-zone move at `fallbackGroupId` when the set can't merge
+ * (non-rectangular selection).
+ */
+export function mergeTreeZones(groupIds: string[], paneId: string, fallbackGroupId: string | null) {
+  const tree = $layoutTree.get()
+
+  if (!tree) {
+    return
+  }
+
+  const merged = mergeZonesWithPaneOp(tree, groupIds, paneId)
+
+  if (merged) {
+    commit(merged)
+    markActivePreset('custom')
+  } else if (fallbackGroupId) {
+    moveTreePane(paneId, { groupId: fallbackGroupId, pos: 'center' })
+  }
+}
+
+export function activateTreePane(groupId: string, paneId: string) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(setActivePaneOp(tree, groupId, paneId))
+  }
+}
+
+export function reorderTreePane(groupId: string, paneId: string, toIndex: number) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(reorderPaneInGroupOp(tree, groupId, paneId, toIndex))
+    markActivePreset('custom')
+  }
+}
+
+/** Split a zone on `side`. With `movePaneId` (one of several panes in the
+ *  group) the pane MOVES into the new zone; otherwise the zone is empty. */
+export function splitTreeZone(groupId: string, side: RootEdge, movePaneId?: string) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(splitGroupZoneOp(tree, groupId, side, movePaneId))
+    markActivePreset('custom')
+  }
+}
+
+export function toggleTreeGroupMinimized(groupId: string, minimized: boolean) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(setGroupMinimized(tree, groupId, minimized))
+  }
+}
+
+/** Hide/show a zone's header entirely (double-click gesture). */
+export function setTreeGroupHeaderHidden(groupId: string, headerHidden: boolean) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    commit(setGroupHeaderHiddenOp(tree, groupId, headerHidden))
+  }
+}
+
+export function setTreeSplitWeights(splitId: string, weights: number[]) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    // Weight drags are high-frequency: update live, persist on the trailing edge.
+    $layoutTree.set(setSplitWeightsOp(tree, splitId, weights))
+  }
+}
+
+function findSplitWeights(node: LayoutNode, splitId: string): number[] | null {
+  if (node.type !== 'split') {
+    return null
+  }
+
+  if (node.id === splitId) {
+    return node.weights
+  }
+
+  for (const child of node.children) {
+    const hit = findSplitWeights(child, splitId)
+
+    if (hit) {
+      return hit
+    }
+  }
+
+  return null
+}
+
+/**
+ * The weights a layout preset declares for `splitId` — the ACTIVE preset
+ * first, then any other preset that knows the id. (Rearranging panes marks
+ * the active preset 'custom' but zone STRUCTURE — and so split ids — comes
+ * from whichever preset was applied, so the original baseline stays
+ * findable.) Null when no preset has a matching-shape split.
+ */
+export function presetSplitWeights(splitId: string, length: number): number[] | null {
+  const activeId = $activePresetId.get()
+  const presets = [...registry.getArea('layouts')].sort((a, b) => Number(b.id === activeId) - Number(a.id === activeId))
+
+  for (const preset of presets) {
+    const weights = preset.data && isLayoutNode(preset.data) ? findSplitWeights(preset.data, splitId) : null
+
+    if (weights && weights.length === length) {
+      return [...weights]
+    }
+  }
+
+  return null
+}
+
+export function persistTree() {
+  persist($layoutTree.get())
+}
+
+export function resetLayoutTree() {
+  persist(null)
+  clearAllPaneSizeOverrides()
+  $layoutTree.set(defaultTree)
+  markActivePreset('default')
+}
+
+// Dev hook for automation.
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).__HERMES_LAYOUT_TREE__ = {
+    get: () => $layoutTree.get(),
+    move: moveTreePane,
+    reset: resetLayoutTree
+  }
+}

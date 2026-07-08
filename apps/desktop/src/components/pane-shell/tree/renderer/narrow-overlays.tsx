@@ -1,0 +1,117 @@
+/**
+ * Narrow-viewport edge overlays — the tree's take on the app's hover-reveal
+ * collapse. Collapsible panes leave the grid below the sidebar-collapse
+ * breakpoint; an edge strip (hover) or PANE_TOGGLE_REVEAL_EVENT (⌘B / ⌘G /
+ * titlebar toggles route here on narrow) slides the pane OVER the layout
+ * instead of squeezing it. Event reveals pin; hover reveals follow the mouse.
+ */
+
+import { useStore } from '@nanostores/react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+
+import { useContributions } from '@/contrib/react/use-contributions'
+import type { Contribution } from '@/contrib/types'
+import { cn } from '@/lib/utils'
+
+import { PANE_TOGGLE_REVEAL_EVENT } from '../..'
+import { allPaneIds } from '../model'
+import { $hiddenTreePanes, $layoutTree, $narrowViewport } from '../store'
+
+import { paneChrome } from './track-model'
+
+export function NarrowOverlays() {
+  const narrow = useStore($narrowViewport)
+  const tree = useStore($layoutTree)
+  const panes = useContributions('panes')
+  const hiddenPanes = useStore($hiddenTreePanes)
+  const [reveal, setReveal] = useState<{ id: string; pinned: boolean } | null>(null)
+
+  const inTree = useMemo(() => new Set(tree ? allPaneIds(tree) : []), [tree])
+
+  const collapsibles = useMemo(
+    () => panes.filter(p => paneChrome(p).collapsible && inTree.has(p.id) && !hiddenPanes.has(p.id)),
+    [panes, inTree, hiddenPanes]
+  )
+
+  const collapsiblesRef = useRef(collapsibles)
+  collapsiblesRef.current = collapsibles
+
+  // ⌘B / ⌘G's narrow branch dispatches the app's toggle-reveal event with the
+  // REAL pane id — accept those via each contribution's revealAliases.
+  useEffect(() => {
+    if (!narrow) {
+      setReveal(null)
+
+      return
+    }
+
+    const onToggle = (event: Event) => {
+      const id = (event as CustomEvent<{ id?: string }>).detail?.id
+
+      if (!id) {
+        return
+      }
+
+      const match = collapsiblesRef.current.find(p => p.id === id || paneChrome(p).revealAliases?.includes(id))
+
+      if (match) {
+        setReveal(current => (current?.id === match.id && current.pinned ? null : { id: match.id, pinned: true }))
+      }
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setReveal(null)
+      }
+    }
+
+    window.addEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      window.removeEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [narrow])
+
+  if (!narrow || collapsibles.length === 0) {
+    return null
+  }
+
+  const sideOf = (c: Contribution) => (paneChrome(c).placement === 'left' ? 'left' : 'right')
+  const revealed = reveal ? collapsibles.find(p => p.id === reveal.id) : undefined
+  const sides = [...new Set(collapsibles.map(sideOf))]
+
+  return (
+    <>
+      {/* Hover-intent strips on each edge that has a collapsed pane. */}
+      {sides.map(side => (
+        <div
+          className={cn('absolute inset-y-0 z-30 w-1.5', side === 'left' ? 'left-0' : 'right-0')}
+          key={side}
+          onMouseEnter={() => {
+            const first = collapsibles.find(p => sideOf(p) === side)
+
+            if (first) {
+              setReveal(current => (current?.pinned ? current : { id: first.id, pinned: false }))
+            }
+          }}
+        />
+      ))}
+
+      {revealed && (
+        <div
+          className={cn(
+            'absolute inset-y-0 z-40 flex w-[min(20rem,85vw)] flex-col overflow-hidden bg-(--ui-sidebar-surface-background) shadow-2xl',
+            sideOf(revealed) === 'left'
+              ? 'left-0 border-r border-(--ui-stroke-secondary)'
+              : 'right-0 border-l border-(--ui-stroke-secondary)'
+          )}
+          onMouseLeave={() => setReveal(current => (current?.pinned ? current : null))}
+        >
+          {revealed.render?.()}
+        </div>
+      )}
+    </>
+  )
+}

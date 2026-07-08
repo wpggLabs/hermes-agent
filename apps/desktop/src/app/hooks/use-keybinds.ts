@@ -5,7 +5,7 @@ import { $terminalTakeover, setTerminalTakeover } from '@/app/right-sidebar/stor
 import { closeActiveTerminal, createTerminal, cycleTerminal } from '@/app/right-sidebar/terminal/terminals'
 import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
 import { matchesQuery } from '@/hooks/use-media-query'
-import { PROFILE_SLOT_COUNT, SESSION_SLOT_COUNT } from '@/lib/keybinds/actions'
+import { contributedKeybindHandler, PROFILE_SLOT_COUNT, SESSION_SLOT_COUNT } from '@/lib/keybinds/actions'
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from '@/lib/keybinds/combo'
 import { $repoStatus } from '@/store/coding-status'
 import { toggleCommandPalette } from '@/store/command-palette'
@@ -242,7 +242,9 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
-      const handler = handlersRef.current[actionId]
+      // Built-in handlers first (they carry React context); contributed
+      // actions bring their own `run` through the registry.
+      const handler = handlersRef.current[actionId] ?? contributedKeybindHandler(actionId)
 
       if (!handler) {
         return

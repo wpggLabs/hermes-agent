@@ -1,0 +1,197 @@
+/**
+ * The TRACK MODEL — how a layout node resolves its size along a split axis.
+ *
+ * A node is a FIXED track when it resolves to a CSS length (sidebars keep
+ * their declared size) and a FLEX track when it doesn't (weight-shared
+ * leftover). Everything here is pure geometry over the layout tree + the
+ * live pane contributions; the React split renderer reads it per render.
+ */
+
+import type { Contribution } from '@/contrib/types'
+
+import type { GroupNode, LayoutNode } from '../model'
+import { allPaneIds } from '../model'
+
+export const MIN_PANE_PX = 80
+
+/** Optional CSS sizing a pane contributes (`data.width` / `data.minWidth`…).
+ *  Applied to the pane's GROUP along the axis of the split that contains it —
+ *  the same semantics as the app's `Pane width/minWidth/maxWidth` props:
+ *  a `width`/`height` makes the zone a FIXED track (sidebar-style — it keeps
+ *  its size and the weighted zones absorb the rest); without one the zone
+ *  shares leftover space by weight. */
+export interface PaneSizing {
+  width?: string
+  height?: string
+  minWidth?: string
+  maxWidth?: string
+  minHeight?: string
+  maxHeight?: string
+}
+
+/** Chrome behavior flags a pane contributes. Read via `paneChrome`. */
+interface PaneChrome {
+  /** Leaves the grid on narrow viewports; revealed as an edge overlay. */
+  collapsible?: boolean
+  /** Extra ids accepted from PANE_TOGGLE_REVEAL_EVENT (the real app's pane
+   *  ids, e.g. `chat-sidebar` for `sessions`). */
+  revealAliases?: string[]
+  placement?: string
+}
+
+export const paneChrome = (c: Contribution | undefined) => (c?.data ?? {}) as PaneChrome
+
+/** Resolve a computed style length ("237px" / "none" / "auto") to px. */
+export function computedPx(value: string, fallback: number): number {
+  const n = Number.parseFloat(value)
+
+  return Number.isFinite(n) ? n : fallback
+}
+
+/** Resolve an AUTHORED CSS length ("237px", "38vh", "clamp(18rem,36vw,32rem)")
+ *  to px by measuring a probe inside `container` — handles every unit and
+ *  math function the browser does. */
+export function resolveCssPx(container: HTMLElement, css: number | string, horizontal: boolean): number | null {
+  if (typeof css === 'number') {
+    return css
+  }
+
+  const probe = document.createElement('div')
+  probe.style.position = 'absolute'
+  probe.style.visibility = 'hidden'
+  probe.style.pointerEvents = 'none'
+
+  if (horizontal) {
+    probe.style.width = css
+  } else {
+    probe.style.height = css
+  }
+
+  container.appendChild(probe)
+  const rect = probe.getBoundingClientRect()
+  probe.remove()
+  const px = horizontal ? rect.width : rect.height
+
+  return Number.isFinite(px) && px > 0 ? px : null
+}
+
+/** Everything fixed-track resolution needs about the current view state. */
+export interface TrackContext {
+  paneFor: (id: string) => Contribution | undefined
+  paneGone: (id: string) => boolean
+  overrides: Record<string, { widthOverride?: number; heightOverride?: number }>
+}
+
+/** The zone's visible active pane (render-side fallback like TreeGroup). */
+export function activeShownPane(group: GroupNode, ctx: TrackContext): string | null {
+  if (!ctx.paneGone(group.active)) {
+    return group.active
+  }
+
+  return group.panes.find(id => !ctx.paneGone(id)) ?? null
+}
+
+/**
+ * THE TRACK MODEL. A node's size along `axis` is FIXED when it resolves to a
+ * CSS length, and FLEX (weight-shared leftover) when null:
+ *
+ *  - zone: its active pane's declared `width`/`height` (a live px override
+ *    from a sash drag wins) — sidebars keep their size, main flexes.
+ *  - split ALONG the axis: the sum of its visible children — fixed only when
+ *    every child is (one flex child makes the run flex).
+ *  - split ACROSS the axis: the max of its visible fixed children (flex
+ *    children just stretch to the container); flex only when none are fixed.
+ *
+ * This is how "two right sidebars over a terminal row" sizes itself from its
+ * content (237px, or 474px when review is visible) instead of taking a
+ * fraction of the window.
+ */
+export function fixedTrackSize(node: LayoutNode, axis: 'row' | 'column', ctx: TrackContext): string | null {
+  if (node.type === 'group') {
+    const overrideKey = axis === 'row' ? 'widthOverride' : 'heightOverride'
+
+    const declared = (id: string) => {
+      if (ctx.overrides[id]?.[overrideKey] !== undefined) {
+        return `${ctx.overrides[id]?.[overrideKey]}px`
+      }
+
+      const sizing = (ctx.paneFor(id)?.data ?? {}) as PaneSizing
+
+      return (axis === 'row' ? sizing.width : sizing.height) ?? null
+    }
+
+    // A zone is a fixed track only when EVERY shown pane sizes itself along
+    // the axis (a pure sidebar stack). Mixing a sidebar pane into a flex
+    // zone (files fronted in the Focus mono-stack) must NOT snap the whole
+    // zone to sidebar width — the flex pane keeps the zone flex.
+    const shown = node.panes.filter(id => !ctx.paneGone(id))
+    const active = activeShownPane(node, ctx)
+
+    if (!active || !shown.every(id => declared(id) !== null)) {
+      return null
+    }
+
+    return declared(active)
+  }
+
+  const visible = node.children.filter(child => !subtreeGone(child, ctx))
+  const sizes = visible.map(child => fixedTrackSize(child, axis, ctx))
+
+  if (node.orientation === axis) {
+    if (sizes.length === 0 || sizes.some(size => size === null)) {
+      return null
+    }
+
+    return sizes.length === 1 ? sizes[0] : `calc(${sizes.join(' + ')})`
+  }
+
+  const fixed = sizes.filter((size): size is string => size !== null)
+
+  if (fixed.length === 0) {
+    return null
+  }
+
+  return fixed.length === 1 ? fixed[0] : `max(${fixed.join(', ')})`
+}
+
+/** True when every pane in the subtree is hidden/narrow-collapsed. */
+export function subtreeGone(node: LayoutNode, ctx: TrackContext): boolean {
+  const ids = allPaneIds(node)
+
+  return ids.length > 0 && ids.every(ctx.paneGone)
+}
+
+/**
+ * The FIXED zone that owns `edge` of this subtree along `axis` — the zone a
+ * sash on that boundary actually resizes (dragging the seam between main and
+ * a nested right section resizes the section's edge sidebar, VS Code-style).
+ */
+export function edgeFixedZone(
+  node: LayoutNode,
+  edge: 'start' | 'end',
+  axis: 'row' | 'column',
+  ctx: TrackContext
+): GroupNode | null {
+  if (node.type === 'group') {
+    return fixedTrackSize(node, axis, ctx) !== null ? node : null
+  }
+
+  const visible = node.children.filter(child => !subtreeGone(child, ctx))
+
+  if (node.orientation === axis) {
+    const child = edge === 'start' ? visible[0] : visible[visible.length - 1]
+
+    return child ? edgeFixedZone(child, edge, axis, ctx) : null
+  }
+
+  // Cross-axis: every child touches the edge — the first fixed one owns it.
+  for (const child of visible) {
+    const zone = edgeFixedZone(child, edge, axis, ctx)
+
+    if (zone) {
+      return zone
+    }
+  }
+
+  return null
+}

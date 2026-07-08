@@ -461,11 +461,36 @@ export function McpTab({ gateway }: { gateway: HermesGateway | null }) {
   const draftSeeded = useRef(false)
 
   useEffect(() => {
-    if (config && !draftSeeded.current) {
+    // profilePending: config still holds the PREVIOUS profile's record right
+    // after a switch — seeding from it would latch the wrong profile's doc.
+    if (!config || profilePending) {
+      return
+    }
+
+    if (!draftSeeded.current) {
       draftSeeded.current = true
       resetDraft(getServers(config))
+
+      return
     }
-  }, [config])
+
+    if (dirty || names.length === 0) {
+      return
+    }
+
+    // Heal the early-boot race: the first config snapshot can land before the
+    // backend has mcp_servers assembled, seeding (and latching) an empty doc
+    // while later refetches fill the list — saving would then wipe the real
+    // servers. A PRISTINE empty draft reseeds when servers arrive; any user
+    // edit (dirty) still always wins.
+    try {
+      if (Object.keys(parseServersDoc(draft)).length === 0) {
+        resetDraft(servers)
+      }
+    } catch {
+      // Mid-edit / invalid JSON — the user's text wins.
+    }
+  }, [config, dirty, draft, names, profilePending, servers])
 
   // Bumped on every profile switch. Async probe/auth completions capture the
   // epoch at call time and bail if it changed, so a slow profile-A request can't
